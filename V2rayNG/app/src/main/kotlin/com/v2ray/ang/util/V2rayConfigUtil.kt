@@ -3,9 +3,7 @@ package com.v2ray.ang.util
 import android.content.Context
 import android.text.TextUtils
 import android.util.Log
-import com.google.gson.Gson
-import com.google.gson.GsonBuilder
-import com.google.gson.JsonArray
+import com.google.gson.*
 import com.v2ray.ang.AngApplication
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.dto.AngConfig.VmessBean
@@ -14,9 +12,10 @@ import com.v2ray.ang.ui.SettingsActivity
 import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONArray
-import com.google.gson.JsonObject
 import com.v2ray.ang.dto.EConfigType
 import com.v2ray.ang.extension.defaultDPreference
+import kotlin.collections.ArrayList
+import kotlin.collections.LinkedHashSet
 
 object V2rayConfigUtil {
     private val requestObj: JsonObject by lazy {
@@ -49,11 +48,6 @@ object V2rayConfigUtil {
                 result = getV2rayConfigType1(app, vmess)
             }
 
-            val domainName = parseDomainName(result.content)
-            if (!TextUtils.isEmpty(domainName)) {
-                app.defaultDPreference.setPrefString(AppConfig.PREF_CURR_CONFIG_DOMAIN, domainName)
-            }
-
             Log.d("V2rayConfigUtilGoLog", result.content)
             return result
         } catch (e: Exception) {
@@ -67,11 +61,16 @@ object V2rayConfigUtil {
         if (TextUtils.isEmpty(jsonConfig)) {
             return null
         }
-        val v2rayConfig = Gson().fromJson(jsonConfig, V2rayConfig::class.java) ?: return null
-        for (outbound in v2rayConfig.outbounds) {
-            if (outbound.protocol.equals(EConfigType.VMESS.name.toLowerCase()) ||
-                    outbound.protocol.equals(EConfigType.SHADOWSOCKS.name.toLowerCase()) ||
-                    outbound.protocol.equals(EConfigType.SOCKS.name.toLowerCase())) {
+        val v2rayConfig: V2rayConfig? = try {
+            Gson().fromJson(jsonConfig, V2rayConfig::class.java)
+        } catch (e: JsonSyntaxException) {
+            e.printStackTrace()
+            null
+        }
+        v2rayConfig?.outbounds?.forEach { outbound ->
+            if (outbound.protocol.equals(EConfigType.VMESS.name, true) ||
+                    outbound.protocol.equals(EConfigType.SHADOWSOCKS.name, true) ||
+                    outbound.protocol.equals(EConfigType.SOCKS.name, true)) {
                 return outbound
             }
         }
@@ -130,6 +129,7 @@ object V2rayConfigUtil {
             val jsonConfig = app.defaultDPreference.getPrefString(AppConfig.ANG_CONFIG + guid, "")
             result.status = true
             result.content = jsonConfig
+            parseDomainNameAndTag(app, jsonConfig)
             return result
 
         } catch (e: Exception) {
@@ -226,18 +226,21 @@ object V2rayConfigUtil {
                     //Mux
                     outbound.mux?.enabled = false
                 }
-                else -> {
-                }
             }
 
-            var serverDomain: String
-            if(Utils.isIpv6Address(vmess.address)) {
-                serverDomain = String.format("[%s]:%s", vmess.address, vmess.port)
+            val serverDomain = if (Utils.isIpv6Address(vmess.address)) {
+                String.format("[%s]:%s", vmess.address, vmess.port)
             } else {
-                serverDomain = String.format("%s:%s", vmess.address, vmess.port)
+                String.format("%s:%s", vmess.address, vmess.port)
             }
             app.defaultDPreference.setPrefString(AppConfig.PREF_CURR_CONFIG_DOMAIN, serverDomain)
-
+            val tags = LinkedHashSet<String>()
+            v2rayConfig.outbounds.forEach {
+                if (!TextUtils.isEmpty(it.tag)) {
+                    tags.add(it.tag)
+                }
+            }
+            app.defaultDPreference.setPrefStringOrderedSet(AppConfig.PREF_CURR_CONFIG_OUTBOUND_TAGS, tags)
         } catch (e: Exception) {
             e.printStackTrace()
             return false
@@ -629,42 +632,58 @@ object V2rayConfigUtil {
         }
     }
 
-    private fun parseDomainName(jsonConfig: String): String {
+    private fun parseDomainNameAndTag(app: AngApplication, jsonConfig: String) {
         try {
             val jObj = JSONObject(jsonConfig)
-            var domainName: String
+            var domainName = ""
+            val tags = LinkedHashSet<String>()
             if (jObj.has("outbound")) {
-                domainName = parseDomainName(jObj.optJSONObject("outbound"))
-                if (!TextUtils.isEmpty(domainName)) {
-                    return domainName
+                val (domain, tag) = parseDomainNameAndTag(jObj.optJSONObject("outbound"))
+                domainName = domain
+                if (!TextUtils.isEmpty(tag)) {
+                    tags.add(tag)
                 }
             }
             if (jObj.has("outbounds")) {
                 for (i in 0..(jObj.optJSONArray("outbounds").length() - 1)) {
-                    domainName = parseDomainName(jObj.optJSONArray("outbounds").getJSONObject(i))
-                    if (!TextUtils.isEmpty(domainName)) {
-                        return domainName
+                    val (domain, tag) = parseDomainNameAndTag(jObj.optJSONArray("outbounds").getJSONObject(i))
+                    if (!TextUtils.isEmpty(domain) && TextUtils.isEmpty(domainName)) {
+                        domainName = domain
+                    }
+                    if (!TextUtils.isEmpty(tag)) {
+                        tags.add(tag)
                     }
                 }
             }
             if (jObj.has("outboundDetour")) {
                 for (i in 0..(jObj.optJSONArray("outboundDetour").length() - 1)) {
-                    domainName = parseDomainName(jObj.optJSONArray("outboundDetour").getJSONObject(i))
-                    if (!TextUtils.isEmpty(domainName)) {
-                        return domainName
+                    val (domain, tag) = parseDomainNameAndTag(jObj.optJSONArray("outboundDetour").getJSONObject(i))
+                    if (!TextUtils.isEmpty(domain) && TextUtils.isEmpty(domainName)) {
+                        domainName = domain
+                    }
+                    if (!TextUtils.isEmpty(tag)) {
+                        tags.add(tag)
                     }
                 }
             }
+            if (!TextUtils.isEmpty(domainName)) {
+                app.defaultDPreference.setPrefString(AppConfig.PREF_CURR_CONFIG_DOMAIN, domainName)
+            }
+            app.defaultDPreference.setPrefStringOrderedSet(AppConfig.PREF_CURR_CONFIG_OUTBOUND_TAGS, tags)
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return ""
     }
 
-    private fun parseDomainName(outbound: JSONObject): String {
+    private fun parseDomainNameAndTag(outbound: JSONObject): Pair<String, String> {
+        val tag = if (outbound.has("tag")) {
+            outbound.getString("tag")
+        } else {
+            ""
+        }
         try {
             if (outbound.has("settings")) {
-                var vnext: JSONArray?
+                val vnext: JSONArray?
                 if (outbound.optJSONObject("settings").has("vnext")) {
                     // vmess
                     vnext = outbound.optJSONObject("settings").optJSONArray("vnext")
@@ -672,22 +691,22 @@ object V2rayConfigUtil {
                     // shadowsocks or socks
                     vnext = outbound.optJSONObject("settings").optJSONArray("servers")
                 } else {
-                    return ""
+                    return Pair("", tag)
                 }
                 for (i in 0..(vnext.length() - 1)) {
                     val item = vnext.getJSONObject(i)
                     val address = item.getString("address")
                     val port = item.getString("port")
                     if(Utils.isIpv6Address(address)) {
-                        return String.format("[%s]:%s", address, port)
+                        return Pair(String.format("[%s]:%s", address, port), tag)
                     } else {
-                        return String.format("%s:%s", address, port)
+                        return Pair(String.format("%s:%s", address, port), tag)
                     }
                 }
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return ""
+        return Pair("", tag)
     }
 }
